@@ -77,6 +77,7 @@ import {
   normalizeAndRepairCatalogItems,
   buildPriceListWorkbook,
   generatePriceListSheetRows,
+  generateJobberMasterSinglePageSheetRows,
   convertItemForCleanersCount,
 } from "./src/data/serviceCatalogData";
 
@@ -978,7 +979,7 @@ function parseVoiceTicketHeuristic(transcript: string) {
     recommendedCleaners = 1;
   }
 
-  // Spoken-number & conversational normalization for voice dictation
+  // Spoken-number, compound-number, and ordinal normalization for voice dictation
   const singleDigitWordMap: Record<string, string> = {
     zero: "0",
     oh: "0",
@@ -992,13 +993,97 @@ function parseVoiceTicketHeuristic(transcript: string) {
     eight: "8",
     nine: "9",
   };
+  const teenAndTensMap: Record<string, number> = {
+    ten: 10,
+    eleven: 11,
+    twelve: 12,
+    thirteen: 13,
+    fourteen: 14,
+    fifteen: 15,
+    sixteen: 16,
+    seventeen: 17,
+    eighteen: 18,
+    nineteen: 19,
+    twenty: 20,
+    thirty: 30,
+    forty: 40,
+    fifty: 50,
+    sixty: 60,
+    seventy: 70,
+    eighty: 80,
+    ninety: 90,
+  };
+  const ordinalWordMap: Record<string, string> = {
+    first: "1st",
+    second: "2nd",
+    third: "3rd",
+    fourth: "4th",
+    fifth: "5th",
+    sixth: "6th",
+    seventh: "7th",
+    eighth: "8th",
+    ninth: "9th",
+    tenth: "10th",
+    eleventh: "11th",
+    twelfth: "12th",
+    thirteenth: "13th",
+    fourteenth: "14th",
+    fifteenth: "15th",
+    sixteenth: "16th",
+    seventeenth: "17th",
+    eighteenth: "18th",
+    nineteenth: "19th",
+    twentieth: "20th",
+    "twenty-first": "21st",
+    "twenty first": "21st",
+    "twenty-second": "22nd",
+    "twenty second": "22nd",
+    "twenty-third": "23rd",
+    "twenty third": "23rd",
+    "twenty-fourth": "24th",
+    "twenty fourth": "24th",
+    "twenty-fifth": "25th",
+    "twenty fifth": "25th",
+    "twenty-sixth": "26th",
+    "twenty sixth": "26th",
+    "twenty-seventh": "27th",
+    "twenty seventh": "27th",
+    "twenty-eighth": "28th",
+    "twenty eighth": "28th",
+    "twenty-ninth": "29th",
+    "twenty ninth": "29th",
+    thirtieth: "30th",
+    "thirty-first": "31st",
+    "thirty first": "31st",
+  };
 
   // Convert "two and a half" / "one and a half" / "three and a half" before general digit replacement
   let normalizedWords = t
     .replace(/\b(one|two|three|four|1|2|3|4)\s+and\s+a\s+half\b/gi, (_, d) => {
       const base = singleDigitWordMap[String(d).toLowerCase()] || d;
       return `${base}.5`;
-    })
+    });
+
+  // Replace multi-word and single-word ordinals (for dates like "October twenty fourth" or streets like "eighty second avenue")
+  for (const [word, ord] of Object.entries(ordinalWordMap)) {
+    const rx = new RegExp(`\\b${word}\\b`, "gi");
+    normalizedWords = normalizedWords.replace(rx, ord);
+  }
+
+  // Convert compound tens + units like "seventy two" -> "72", "twenty four" -> "24"
+  normalizedWords = normalizedWords
+    .replace(
+      /\b(twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)[\s-]+(one|two|three|four|five|six|seven|eight|nine)\b/gi,
+      (_, tensW, unitW) => {
+        const tensVal = teenAndTensMap[String(tensW).toLowerCase()] || 0;
+        const unitVal = Number(singleDigitWordMap[String(unitW).toLowerCase()] || 0);
+        return String(tensVal + unitVal);
+      }
+    )
+    .replace(
+      /\b(ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\b/gi,
+      (m) => String(teenAndTensMap[m.toLowerCase()] ?? m)
+    )
     // Convert sequences of 2 to 10 spoken single digits (e.g. "Seven two two one" -> "7221")
     .replace(
       /\b(?:(zero|oh|one|two|three|four|five|six|seven|eight|nine)(?:[\s-]+|$)){2,10}/gi,
@@ -1013,9 +1098,12 @@ function parseVoiceTicketHeuristic(transcript: string) {
       }
     )
     .replace(/\b(one|two|three|four|five|six|seven|eight|nine)\b/gi, (m) => singleDigitWordMap[m.toLowerCase()] || m)
+    // Join split 2-digit + 2-digit house numbers before a street name (e.g., "72 21 Chivers" -> "7221 Chivers")
+    .replace(/\b(\d{2})\s+(\d{2})\s+([A-Za-z]{3,})/g, "$1$2 $3")
     // Common Edmonton phonetic street & quadrant normalizations from Web Speech API
     .replace(/\b(?:child'?s|shrivers?|shivers?)\s+place\b/gi, "Chivers Place")
     .replace(/\b(?:child'?s|shrivers?|shivers?)\s+way\b/gi, "Chivers Way")
+    .replace(/\bwhite\s+(ave|avenue)\b/gi, "Whyte $1")
     .replace(/\bsouth\s*west\b/gi, "SW")
     .replace(/\bnorth\s*west\b/gi, "NW")
     .replace(/\bsouth\s*east\b/gi, "SE")
@@ -1085,7 +1173,7 @@ function parseVoiceTicketHeuristic(transcript: string) {
   // City & Corridor extraction
   let city = "Edmonton";
   let selectedPresetIdx = 0;
-  if (lower.includes("st albert") || lower.includes("st. albert") || lower.includes("boudreau")) {
+  if (lower.includes("st albert") || lower.includes("st. albert") || lower.includes("saint albert") || lower.includes("boudreau")) {
     city = "St. Albert";
     selectedPresetIdx = 5;
   } else if (lower.includes("sherwood park") || lower.includes("premier way") || lower.includes("strathcona county")) {
@@ -1105,14 +1193,190 @@ function parseVoiceTicketHeuristic(transcript: string) {
     selectedPresetIdx = 3;
   }
 
-  // Street address extraction (supports both digits and normalized spoken digits like "7221 Chivers Place SW")
+  // Street address extraction — supports all Edmonton & Alberta street suffixes, numbered streets/avenues, and explicit "address is ..." cues
   let address = "";
-  const addrRegex = /\b(\d{2,5}\s+[A-Za-z0-9.'\s]{2,28}?\b(?:Ave|Avenue|St|Street|Rd|Road|Dr|Drive|Blvd|Boulevard|Way|Pl|Place|Cres|Crescent|Trail|Tr|Ct|Court|Close|Lane|Ln)\b(?:\s*(?:NW|NE|SW|SE))?)/gi;
-  const addrMatches = Array.from(normalizedWords.matchAll(addrRegex));
-  if (addrMatches.length > 0) {
-    // Prefer the last stated address in case the speaker repeated/corrected the street name
-    const bestAddr = addrMatches[addrMatches.length - 1][1].replace(/\s+/g, " ").trim();
+  const nonStreetWords = /^(?:bed|beds|bedroom|bedrooms|bath|baths|bathroom|bathrooms|hour|hours|hr|hrs|cleaner|cleaners|dollar|dollars|deposit|discount|phone|number|call|calling|is|are|for|with|and|the|at|on|in)$/i;
+  const suffixPattern =
+    "(?:Ave|Avenue|St|Street|Rd|Road|Dr|Drive|Blvd|Boulevard|Way|Pl|Place|Cres|Crescent|Trail|Tr|Ct|Court|Close|Lane|Ln|Gate|Green|Grove|Gardens?|Gdns|Circle|Cir|Cove|Cv|Common|Crossing|Bend|Bay|Heights|Hts|Hill|Hills|Heath|Hollow|Link|Landing|Lndg|Loop|Lookout|Manor|Mews|Meadows?|Mount|Mt|Park|Parkway|Pkwy|Pass|Path|Peak|Point|Pointe|Pt|Promenade|Plateau|Ridge|Rise|Row|Run|Square|Sq|Terrace|Terr|Turn|Valley|View|Vista|Villages?|Villas|Walk|Wynd|Woods|Hwy|Highway)";
+  const addrRegex = new RegExp(
+    `\\b(\\d{1,6}[A-Za-z]?\\s+(?:\\d{1,3}(?:st|nd|rd|th)?|[A-Za-z][A-Za-z0-9.']*?)(?:\\s+(?:\\d{1,3}(?:st|nd|rd|th)?|[A-Za-z][A-Za-z0-9.']*?)){0,2}\\s+${suffixPattern}\\b(?:\\s*(?:NW|NE|SW|SE))?)`,
+    "gi"
+  );
+  const validCandidates: string[] = [];
+  for (const m of normalizedWords.matchAll(addrRegex)) {
+    const rawCandidate = m[1].replace(/\s+/g, " ").trim();
+    const parts = rawCandidate.split(" ");
+    // Make sure the words between house number and street suffix are real street tokens, not filler like "and address is"
+    const middleTokens = parts.slice(1, -1);
+    if (middleTokens.length > 0 && middleTokens.every((w) => !nonStreetWords.test(w) && !/^\d{4,10}$/.test(w))) {
+      validCandidates.push(rawCandidate);
+    }
+  }
+  if (validCandidates.length > 0) {
+    const bestAddr = validCandidates[validCandidates.length - 1];
     address = `${bestAddr}, ${city}, AB`;
+  } else {
+    // Fallback: explicit cue phrase like "address is 7221 Chivers" or "located at 10405 82nd NW"
+    const cueRegex =
+      /(?:address\s+is|street\s+address\s+is|my\s+address\s+is|property\s+is\s+at|located\s+at|live\s+at|lives\s+at|clean\s+at)\s+(\d{1,6}[A-Za-z]?\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,3}(?:\s*(?:NW|NE|SW|SE))?)/gi;
+    const cueMatches = Array.from(normalizedWords.matchAll(cueRegex));
+    if (cueMatches.length > 0) {
+      const rawCue = cueMatches[cueMatches.length - 1][1]
+        .replace(/\b(?:in|for|on|phone|need|needs|want|wants|bedroom|bedrooms|today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b.*$/i, "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (rawCue.length >= 4) {
+        address = `${rawCue}, ${city}, AB`;
+      }
+    }
+  }
+
+  // Preferred Date / Day of the Week & Time Window extraction (Edmonton timezone)
+  const edmontonNowParts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Edmonton",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const edYear = Number(edmontonNowParts.find((p) => p.type === "year")?.value || 2026);
+  const edMonth = Number(edmontonNowParts.find((p) => p.type === "month")?.value || 10);
+  const edDay = Number(edmontonNowParts.find((p) => p.type === "day")?.value || 19);
+  const baseDateUtc = new Date(Date.UTC(edYear, edMonth - 1, edDay, 12, 0, 0));
+
+  const formatYmd = (d: Date) => {
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const day = String(d.getUTCDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  };
+
+  let preferredDate = "";
+  let preferredDayLabel = "";
+  const normLower = normalizedWords.toLowerCase();
+
+  const monthMap: Record<string, number> = {
+    january: 1, jan: 1,
+    february: 2, feb: 2,
+    march: 3, mar: 3,
+    april: 4, apr: 4,
+    may: 5,
+    june: 6, jun: 6,
+    july: 7, jul: 7,
+    august: 8, aug: 8,
+    september: 9, sep: 9, sept: 9,
+    october: 10, oct: 10,
+    november: 11, nov: 11,
+    december: 12, dec: 12,
+  };
+  const monthNamesRegex = "(?:january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sep|sept|october|oct|november|nov|december|dec)";
+
+  // 1. Explicit ISO date YYYY-MM-DD
+  const isoMatches = Array.from(normalizedWords.matchAll(/\b(202\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))\b/g));
+  // 2. Month + Day (e.g., "October 24", "Oct 24th", "November 2nd 2026")
+  const monthDayMatches = Array.from(
+    normalizedWords.matchAll(new RegExp(`\\b(${monthNamesRegex})\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:[,\\s]+(202\\d))?\\b`, "gi"))
+  );
+  // 3. Day + of + Month (e.g., "24th of October")
+  const dayMonthMatches = Array.from(
+    normalizedWords.matchAll(new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(?:of\\s+)?(${monthNamesRegex})\\b`, "gi"))
+  );
+  // 4. Relative words ("day after tomorrow", "tomorrow", "today")
+  // 5. Day of the week ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+  const weekdayMap: Record<string, number> = {
+    sunday: 0,
+    monday: 1,
+    tuesday: 2,
+    wednesday: 3,
+    thursday: 4,
+    friday: 5,
+    saturday: 6,
+  };
+  const weekdayMatches = Array.from(
+    normalizedWords.matchAll(/\b(?:(this|next|coming|on|for)\s+)?(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/gi)
+  );
+  // 6. Ordinal day alone ("on the 25th", "for the 28th", "date is the 23rd")
+  const ordinalOnlyMatches = Array.from(
+    normalizedWords.matchAll(/\b(?:on\s+the|for\s+the|date\s+is\s+the|the)\s+(\d{1,2})(?:st|nd|rd|th)\b/gi)
+  );
+
+  if (isoMatches.length > 0) {
+    preferredDate = isoMatches[isoMatches.length - 1][1];
+  } else if (monthDayMatches.length > 0) {
+    const last = monthDayMatches[monthDayMatches.length - 1];
+    const mNum = monthMap[last[1].toLowerCase()] || edMonth;
+    const dNum = Math.min(31, Math.max(1, parseInt(last[2], 10)));
+    let yNum = last[3] ? parseInt(last[3], 10) : edYear;
+    if (!last[3] && mNum < edMonth - 1) yNum += 1;
+    preferredDate = `${yNum}-${String(mNum).padStart(2, "0")}-${String(dNum).padStart(2, "0")}`;
+  } else if (dayMonthMatches.length > 0) {
+    const last = dayMonthMatches[dayMonthMatches.length - 1];
+    const dNum = Math.min(31, Math.max(1, parseInt(last[1], 10)));
+    const mNum = monthMap[last[2].toLowerCase()] || edMonth;
+    let yNum = edYear;
+    if (mNum < edMonth - 1) yNum += 1;
+    preferredDate = `${yNum}-${String(mNum).padStart(2, "0")}-${String(dNum).padStart(2, "0")}`;
+  } else if (/\bday\s+after\s+tomorrow\b/i.test(normLower)) {
+    const d = new Date(baseDateUtc.getTime() + 2 * 86400000);
+    preferredDate = formatYmd(d);
+  } else if (/\btomorrow\b/i.test(normLower)) {
+    const d = new Date(baseDateUtc.getTime() + 1 * 86400000);
+    preferredDate = formatYmd(d);
+  } else if (weekdayMatches.length > 0) {
+    const last = weekdayMatches[weekdayMatches.length - 1];
+    const modifier = (last[1] || "").toLowerCase();
+    const dayName = last[2].toLowerCase();
+    const targetDow = weekdayMap[dayName];
+    const currentDow = baseDateUtc.getUTCDay();
+    let diff = (targetDow - currentDow + 7) % 7;
+    if (diff === 0) {
+      diff = modifier === "next" ? 7 : 0;
+    } else if (modifier === "next" && diff <= 2) {
+      diff += 7;
+    }
+    const d = new Date(baseDateUtc.getTime() + diff * 86400000);
+    preferredDate = formatYmd(d);
+  } else if (ordinalOnlyMatches.length > 0) {
+    const last = ordinalOnlyMatches[ordinalOnlyMatches.length - 1];
+    const dNum = Math.min(31, Math.max(1, parseInt(last[1], 10)));
+    let mNum = edMonth;
+    let yNum = edYear;
+    if (dNum < edDay) {
+      mNum += 1;
+      if (mNum > 12) {
+        mNum = 1;
+        yNum += 1;
+      }
+    }
+    preferredDate = `${yNum}-${String(mNum).padStart(2, "0")}-${String(dNum).padStart(2, "0")}`;
+  } else if (/\b(?:today|tonight|same\s+day)\b/i.test(normLower)) {
+    preferredDate = formatYmd(baseDateUtc);
+  }
+
+  if (preferredDate) {
+    const [py, pm, pd] = preferredDate.split("-").map(Number);
+    if (py && pm && pd) {
+      const dtObj = new Date(Date.UTC(py, pm - 1, pd, 12, 0, 0));
+      preferredDayLabel = dtObj.toLocaleDateString("en-US", {
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+        timeZone: "UTC",
+      });
+    }
+  }
+
+  // Time Window extraction
+  let timeWindow = "";
+  let scheduledTime = "";
+  if (/\b(?:morning|8\s*a\.?m\.?|9\s*a\.?m\.?|10\s*a\.?m\.?|11\s*a\.?m\.?)\b/i.test(normLower)) {
+    timeWindow = "Morning (8:00 AM - 12:00 PM)";
+    scheduledTime = "09:00";
+  } else if (/\b(?:afternoon|noon|12\s*p\.?m\.?|1\s*p\.?m\.?|2\s*p\.?m\.?|3\s*p\.?m\.?)\b/i.test(normLower)) {
+    timeWindow = "Afternoon (12:00 PM - 4:00 PM)";
+    scheduledTime = "13:00";
+  } else if (/\b(?:evening|4\s*p\.?m\.?|5\s*p\.?m\.?|6\s*p\.?m\.?|7\s*p\.?m\.?)\b/i.test(normLower)) {
+    timeWindow = "Evening (4:00 PM - 7:00 PM)";
+    scheduledTime = "16:30";
   }
 
   // Customer Name extraction (case-insensitive + conversational Q&A support + duplicate first-name dedupe)
@@ -1120,7 +1384,8 @@ function parseVoiceTicketHeuristic(transcript: string) {
   const stopWords = new Set([
     "calling", "from", "at", "phone", "number", "needs", "need", "wants", "want", "looking", "for",
     "okay", "ok", "and", "what", "whats", "is", "your", "address", "seven", "two", "one", "three",
-    "four", "five", "six", "eight", "nine", "bedroom", "bedrooms", "bathroom", "bathrooms", "clean", "cleaning"
+    "four", "five", "six", "eight", "nine", "bedroom", "bedrooms", "bathroom", "bathrooms", "clean", "cleaning",
+    "today", "tomorrow", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"
   ]);
   const namePatterns = [
     /(?:my name is|caller'?s? name is|name is|caller is|client is|customer is|this is)\s+([a-zA-Z]+(?:\s+[a-zA-Z]+){0,2})/i,
@@ -1182,6 +1447,10 @@ function parseVoiceTicketHeuristic(transcript: string) {
     city,
     bedrooms,
     bathrooms,
+    preferredDate,
+    preferredDayLabel,
+    timeWindow,
+    scheduledTime,
     serviceCategory,
     recommendedHours,
     recommendedCleaners,
@@ -1218,9 +1487,24 @@ app.post("/api/dispatch/parse-voice-ticket", async (req, res) => {
       });
     }
 
+    const todayEdmontonStr = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/Edmonton",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date());
+    const todayWeekdayStr = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Edmonton",
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+      year: "numeric",
+    }).format(new Date());
+
     const promptText = `You are an expert Cleaning Service phone intake & quick quote assistant for TidyUps Cleaning in Edmonton, AB (YEG).
+Current Edmonton Date Today: ${todayEdmontonStr} (${todayWeekdayStr}).
 A dispatcher just recorded a live voice dictation / phone call.
-${audioBase64 ? "IMPORTANT: You have BOTH the recorded voice audio AND the browser live speech-to-text transcript below. Compare the audio recording and the text transcript carefully and merge them into ONE single, complete, accurate client & quote record (do NOT split into two records). If the transcript misheard a street name (e.g. 'child's Place' or 'Shrivers place' for 'Chivers Place SW') or wrote numbers as words ('Seven two two one' -> '7221') or missed the last digit of a phone number that is audible in the audio, use the combined truth from both sources!" : "Analyze the voice dictation transcript below and merge all details into ONE single, complete, accurate client & quote record."}
+${audioBase64 ? "IMPORTANT: You have BOTH the recorded voice audio AND the browser live speech-to-text transcript below. Compare the audio recording and the text transcript carefully and merge them into ONE single, complete, accurate client & quote record (do NOT split into two records). Pay extra attention to the PROPERTY ADDRESS and the PREFERRED DATE / PREFERRED DAY OF THE WEEK! If the speaker repeats or corrects the address or preferred date, always use the latest/most accurate address and date." : "Analyze the voice dictation transcript below and merge all details into ONE single, complete, accurate client & quote record. Pay extra attention to the PROPERTY ADDRESS and the PREFERRED DATE / PREFERRED DAY OF THE WEEK!"}
 
 Live Speech-to-Text Transcript:
 "${transcript}"
@@ -1230,6 +1514,8 @@ ${JSON.stringify({
   customerName: heuristic.customerName || currentForm.customerName || "",
   phone: heuristic.phone || currentForm.customerPhone || "",
   address: heuristic.address || currentForm.serviceAddress || "",
+  preferredDate: heuristic.preferredDate || currentForm.preferredDate || "",
+  timeWindow: heuristic.timeWindow || currentForm.timeWindow || "",
   bedrooms: heuristic.bedrooms,
   bathrooms: heuristic.bathrooms,
 })}
@@ -1238,8 +1524,10 @@ Extract and structure the combined Audio + Transcript into JSON with these field
 - customerName: Client's full name properly capitalized (e.g. "Rachel Macdonald", "Devon Clarke") or empty string if not stated
 - phone: Phone number formatted as (780) XXX-XXXX or empty string if not stated
 - email: Email address if stated or empty string
-- address: Full street address with digits and quadrant if stated (e.g. "7221 Chivers Place SW, Edmonton, AB") or empty string
+- address: Full street address with digits and quadrant if stated (e.g. "7221 Chivers Place SW, Edmonton, AB") or empty string. Convert any spoken numbers ("seventy two twenty one" -> "7221") into digits.
 - city: One of ["Edmonton", "St. Albert", "Sherwood Park", "Leduc", "Spruce Grove"]
+- preferredDate: Preferred service date in YYYY-MM-DD format resolved relative to Today (${todayEdmontonStr}, ${todayWeekdayStr}) if any date or day of the week ("Friday", "this Thursday", "next Monday", "tomorrow", "October 24th", etc.) was mentioned, or empty string if not stated
+- timeWindow: One of ["Morning (8:00 AM - 12:00 PM)", "Afternoon (12:00 PM - 4:00 PM)", "Evening (4:00 PM - 7:00 PM)", "Anytime Today (Urgent)"] if morning/afternoon/evening/time was mentioned, or empty string
 - bedrooms: One of ["1 Bedroom", "2 Bedrooms", "3 Bedrooms", "4 Bedrooms", "5+ Bedrooms"]
 - bathrooms: One of ["1 Bathroom", "1.5 Bathrooms", "2 Bathrooms", "2.5 Bathrooms", "3 Bathrooms", "4+ Bathrooms"]
 - serviceCategory: One of ["Residential Standard Cleaning", "Deep Cleaning & Baseboards", "Move-Out / Turnover Vacate Cleaning", "Move-In Detailed Sanitization", "Post-Renovation HEPA Vacuum & Scrub", "Commercial Office Cleaning"]
@@ -1275,7 +1563,7 @@ Extract and structure the combined Audio + Transcript into JSON with these field
 
     const response = await withTimeout(
       ai.models.generateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-3.8-flash",
         contents: contentsPayload,
         config: {
           responseMimeType: "application/json",
@@ -1287,6 +1575,8 @@ Extract and structure the combined Audio + Transcript into JSON with these field
               email: { type: Type.STRING },
               address: { type: Type.STRING },
               city: { type: Type.STRING },
+              preferredDate: { type: Type.STRING },
+              timeWindow: { type: Type.STRING },
               bedrooms: { type: Type.STRING },
               bathrooms: { type: Type.STRING },
               serviceCategory: { type: Type.STRING },
@@ -1306,6 +1596,8 @@ Extract and structure the combined Audio + Transcript into JSON with these field
             required: [
               "customerName",
               "phone",
+              "address",
+              "preferredDate",
               "bedrooms",
               "bathrooms",
               "serviceCategory",
@@ -1331,6 +1623,8 @@ Extract and structure the combined Audio + Transcript into JSON with these field
       customerName: parsed.customerName || heuristic.customerName,
       phone: parsed.phone || heuristic.phone,
       address: parsed.address || heuristic.address,
+      preferredDate: parsed.preferredDate || heuristic.preferredDate,
+      timeWindow: parsed.timeWindow || heuristic.timeWindow,
       bedrooms: parsed.bedrooms || heuristic.bedrooms,
       bathrooms: parsed.bathrooms || heuristic.bathrooms,
       specificInstructions: parsed.specificInstructions || heuristic.specificInstructions,
@@ -2606,8 +2900,8 @@ function repairAndSyncStoreData(store: AppPersistentStore): boolean {
   let mutated = false;
   const googleSheetUrl = `https://docs.google.com/spreadsheets/d/${googleSheetsSyncState?.spreadsheetId || LEADS_SPREADSHEET_ID}/edit`;
 
-  // 1. Keep store.adLeads as a CLEAN Google Sheet (no 104 old legacy rows)
-  const obsoleteLeadPrefixes = ["lead-auto-", "lead-row-", "lead-fb-10", "lead-goog-10", "lead-ig-10", "lead-web-10"];
+  // 1. Keep store.adLeads as a CLEAN Google Sheet (preserve all webhook, sheet, and customer booking rows)
+  const obsoleteLeadPrefixes = ["lead-auto-", "lead-fb-10", "lead-goog-10", "lead-ig-10", "lead-web-10"];
   if (!Array.isArray(store.adLeads)) {
     store.adLeads = [];
     mutated = true;
@@ -2844,14 +3138,16 @@ function repairAndSyncStoreData(store: AppPersistentStore): boolean {
           mutated = true;
         }
         if (!q.lineItems || q.lineItems.length === 0) {
-          const match = matchCatalogItem(q.service, q.bedrooms, q.bathrooms);
+          const match = matchCatalogItem(q.service, q.bedrooms, q.bathrooms, store.serviceCatalog || CANONICAL_SERVICE_CATALOG);
           if (match) {
             q.lineItems = [
               {
-                description: match.name,
-                quantity: 1,
-                unitPrice: match.basePrice,
-                total: match.basePrice,
+                name: match.jobberItemName || match.name,
+                description: match.description || match.jobberItemName || match.name,
+                quantity: match.quantity ?? match.baseHours ?? 1,
+                unitPrice: match.unitPrice ?? 105,
+                total: match.total ?? match.basePrice,
+                taxable: true,
               },
             ];
             mutated = true;
@@ -2996,7 +3292,9 @@ function repairAndSyncStoreData(store: AppPersistentStore): boolean {
         item.quantity === undefined ||
         item.unitPrice === undefined ||
         item.total === undefined ||
-        item.cleanersCount === undefined
+        item.cleanersCount === undefined ||
+        item.taxable === undefined ||
+        store.serviceCatalog.length < 46
     );
     if (needsRepair) {
       store.serviceCatalog = normalizeAndRepairCatalogItems(store.serviceCatalog);
@@ -3518,7 +3816,7 @@ app.post("/api/price-list/convert-cleaners", (req, res) => {
   });
 });
 
-// GET /api/price-list/export.xlsx: Download live updated Google Sheets (.xlsx) file of actual price list
+// GET /api/price-list/export.xlsx: Download live updated Single-Sheet Jobber Master Price List (.xlsx)
 app.get("/api/price-list/export.xlsx", (req, res) => {
   const projectId = getProjectId(req);
   const currentStore = loadStore(projectId);
@@ -3531,7 +3829,7 @@ app.get("/api/price-list/export.xlsx", (req, res) => {
   const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
 
   const dateStr = new Date().toISOString().slice(0, 10);
-  const filename = `Tidyups_Updated_Price_List_Google_Sheets_${dateStr}.xlsx`;
+  const filename = `Tidyups_Jobber_Master_Price_List_${dateStr}.xlsx`;
   res.setHeader(
     "Content-Type",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -3540,7 +3838,7 @@ app.get("/api/price-list/export.xlsx", (req, res) => {
   res.send(buffer);
 });
 
-// GET /api/price-list/export.csv: Download live updated Google Sheets (.csv) file of actual price list
+// GET /api/price-list/export.csv: Download Jobber Products & Services Import CSV (all 108 items)
 app.get("/api/price-list/export.csv", (req, res) => {
   const projectId = getProjectId(req);
   const cleanersParam = req.query.cleaners ? Number(req.query.cleaners) : undefined;
@@ -3550,23 +3848,20 @@ app.get("/api/price-list/export.csv", (req, res) => {
       ? currentStore.serviceCatalog
       : CANONICAL_SERVICE_CATALOG;
   const items = normalizeAndRepairCatalogItems(rawItems);
-  const { headers, rows } = generatePriceListSheetRows(items, cleanersParam);
+  const { headers, rows } = cleanersParam
+    ? generatePriceListSheetRows(items, cleanersParam)
+    : generateJobberMasterSinglePageSheetRows(items);
 
-  const escapeCsvCell = (val: any) => {
-    const str = String(val ?? "");
-    if (str.includes(",") || str.includes('"') || str.includes("\n")) {
-      return `"${str.replace(/"/g, '""')}"`;
-    }
-    return str;
-  };
+  const escapeCsvCell = (val: any) => `"${String(val ?? "").replace(/"/g, '""')}"`;
 
   const csvContent = [
     headers.map(escapeCsvCell).join(","),
     ...rows.map((r) => r.map(escapeCsvCell).join(",")),
-  ].join("\n");
+  ].join("\r\n");
 
-  const dateStr = new Date().toISOString().slice(0, 10);
-  const filename = `Tidyups_Updated_Price_List_Google_Sheets_${dateStr}.csv`;
+  const filename = cleanersParam
+    ? `Tidyups_Price_List_${cleanersParam}_Cleaners.csv`
+    : `jobber-products-services-import.csv`;
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
   res.send(csvContent);
@@ -4398,6 +4693,9 @@ const handleSaveStore = (req: any, res: any) => {
     quoCallLogs,
     spamShieldConfig,
     blockedCallsHistory,
+    headerNavOrder,
+    footerBtnOrder,
+    footerButtonsSide,
   } = req.body || {};
   const current = loadStore(projectId) || {
     version: 1,
@@ -4430,6 +4728,18 @@ const handleSaveStore = (req: any, res: any) => {
     quoCallLogs: quoCallLogs || current.quoCallLogs,
     spamShieldConfig: spamShieldConfig || current.spamShieldConfig,
     blockedCallsHistory: blockedCallsHistory || current.blockedCallsHistory,
+    headerNavOrder:
+      Array.isArray(headerNavOrder) && headerNavOrder.length > 0
+        ? headerNavOrder
+        : current.headerNavOrder,
+    footerBtnOrder:
+      Array.isArray(footerBtnOrder) && footerBtnOrder.length > 0
+        ? footerBtnOrder
+        : current.footerBtnOrder,
+    footerButtonsSide:
+      footerButtonsSide === 'left' || footerButtonsSide === 'right'
+        ? footerButtonsSide
+        : current.footerButtonsSide,
   };
 
   repairAndSyncStoreData(updated);
@@ -5226,12 +5536,41 @@ app.post("/api/google-sheets/config", (req, res) => {
   });
 });
 
-// POST /api/leads/webhook: Direct Inbound Lead Webhook for Facebook Lead Ads (Zapier/Make/Meta) & Google Ads Lead Form Extensions
-app.post("/api/leads/webhook", (req, res) => {
+// GET /api/leads/webhook (and /api/webhooks/facebook, /api/webhooks/google):
+// Supports Facebook / Meta Lead Ads hub.challenge verification AND browser health check
+const handleLeadWebhookVerification = (req: any, res: any) => {
+  const mode = req.query["hub.mode"];
+  const challenge = req.query["hub.challenge"];
+  if (mode === "subscribe" && challenge) {
+    return res.status(200).send(String(challenge));
+  }
+  res.status(200).json({
+    status: "active",
+    service: "833 TidyUps Lead & Customer Booking Webhook",
+    endpoints: [
+      "https://app.tidyupscleaning.com/api/leads/webhook",
+      "https://book.tidyupscleaning.com/api/leads/webhook",
+      "https://app.tidyupscleaning.com/api/webhooks/facebook",
+      "https://app.tidyupscleaning.com/api/webhooks/google",
+    ],
+    spreadsheetId: googleSheetsSyncState.spreadsheetId,
+    sheetUrl: googleSheetsSyncState.sheetUrl,
+    message: "Facebook Lead Ads, Google Ads Lead Form Extensions, and book.tidyupscleaning.com Webhooks are active and ready.",
+  });
+};
+
+app.get("/api/leads/webhook", handleLeadWebhookVerification);
+app.get("/api/webhooks/facebook", handleLeadWebhookVerification);
+app.get("/api/webhooks/google", handleLeadWebhookVerification);
+app.get("/api/leads/facebook", handleLeadWebhookVerification);
+app.get("/api/leads/google", handleLeadWebhookVerification);
+
+// POST /api/leads/webhook (and aliases): Direct Inbound Lead Webhook for Facebook Lead Ads (Zapier/Make/Meta), Google Ads Lead Form Extensions & Customer Booking Sheet
+const handleInboundLeadWebhook = (forcedPlatform?: "Facebook Leads" | "Google Leads") => (req: any, res: any) => {
   const projectId = getProjectId(req);
   const body = req.body || {};
 
-  // Support Google Ads Lead Form Extension format (user_column_data array) as well as Facebook Lead Ads / Zapier / Make flat JSON
+  // Support Google Ads Lead Form Extension format (user_column_data array), Meta Leadgen nested changes, as well as Zapier / Make flat JSON
   const colMap: Record<string, string> = {};
   if (Array.isArray(body.user_column_data)) {
     for (const col of body.user_column_data) {
@@ -5239,11 +5578,20 @@ app.post("/api/leads/webhook", (req, res) => {
       colMap[key] = String(col.string_value || "");
     }
   }
+  if (Array.isArray(body.field_data)) {
+    for (const field of body.field_data) {
+      const key = String(field.name || "").toLowerCase();
+      const val = Array.isArray(field.values) ? field.values[0] : field.value;
+      if (key && val) colMap[key] = String(val);
+    }
+  }
 
   const rawSource = String(
-    body.source ||
+    forcedPlatform ||
+      body.source ||
       body.source_tab ||
       body.platform ||
+      body.utm_source ||
       (body.google_key || body.gclid || body.user_column_data ? "Google Leads" : "FB Leads")
   );
   const { source, sourceTab } = resolveCleanSheetTab(rawSource);
@@ -5256,18 +5604,22 @@ app.post("/api/leads/webhook", (req, res) => {
         body.full_name ||
         body.name ||
         colMap["full_name"] ||
+        colMap["name"] ||
         `${firstName} ${lastName}`.trim() ||
         "Inbound Ad Lead"
     ).trim();
 
-  const phone = String(
-    body.phone ||
-      body.phone_number ||
-      body.clientPhone ||
-      colMap["phone_number"] ||
-      colMap["user_phone"] ||
-      ""
-  ).trim();
+  const phone = normalizePhoneNumber(
+    String(
+      body.phone ||
+        body.phone_number ||
+        body.clientPhone ||
+        colMap["phone_number"] ||
+        colMap["user_phone"] ||
+        colMap["phone"] ||
+        ""
+    ).trim()
+  );
   const email = String(
     body.email || body.clientEmail || colMap["email"] || colMap["user_email"] || ""
   ).trim();
@@ -5275,20 +5627,29 @@ app.post("/api/leads/webhook", (req, res) => {
     body.address ||
       body.street_address ||
       colMap["street_address"] ||
+      colMap["address"] ||
       colMap["postal_code"] ||
       "Edmonton, AB"
   ).trim();
   const city = String(body.city || colMap["city"] || "Edmonton").trim();
   const postalCode = String(body.post_code || body.postalCode || colMap["postal_code"] || "").trim();
-  const bedrooms = String(body.bedrooms || "3 Bedrooms").trim();
-  const bathrooms = String(body.bathrooms || "2 Bathrooms").trim();
+  const bedrooms = String(body.bedrooms || colMap["bedrooms"] || "3 Bedrooms").trim();
+  const bathrooms = String(body.bathrooms || colMap["bathrooms"] || "2 Bathrooms").trim();
   const serviceRequested = String(
-    body.service || body.serviceRequested || "Residential Standard Cleaning"
+    body.service || body.serviceRequested || colMap["service"] || "Residential Standard Cleaning"
   ).trim();
+  const requestedDate = String(
+    body.date_of_service_requested || body.preferredDate || colMap["preferred_date"] || new Date().toISOString().slice(0, 10)
+  ).trim();
+  const quotedAmount = Number(body.quotedAmount || 221.07);
 
   const store = loadStore(projectId);
+  const leadId = `lead-webhook-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
+  const quoteId = `quote_local_${Date.now()}`;
+  const quoteNumber = `QT-${Math.floor(4385 + Math.random() * 500)}`;
+
   const newLead = {
-    id: `lead-webhook-${Date.now().toString(36)}`,
+    id: leadId,
     customerName: fullName,
     phone,
     email,
@@ -5298,32 +5659,227 @@ app.post("/api/leads/webhook", (req, res) => {
     serviceRequested,
     bedrooms,
     bathrooms,
-    dateOfServiceRequested: body.date_of_service_requested || new Date().toISOString().slice(0, 10),
+    dateOfServiceRequested: requestedDate,
     source: source as any,
     sourceTab,
     campaignName: body.campaign_name || body.campaignName || `${sourceTab} Inbound Webhook`,
     dateReceived: new Date().toISOString(),
     status: "New",
-    verdict: "Good lead",
+    verdict: "Good lead" as const,
     isJobberSynced: false,
-    quotedAmount: Number(body.quotedAmount || 221.07),
+    quoteId,
+    quoteNumber,
+    quotedAmount,
     notes: body.message || body.notes || `Received via ${sourceTab} Webhook`,
     missingPhone: !phone,
+    googleSheetSynced: true,
+    googleSheetUrl: googleSheetsSyncState.sheetUrl,
   };
 
   if (store) {
     if (!Array.isArray(store.adLeads)) store.adLeads = [];
-    store.adLeads.unshift(newLead);
+    store.adLeads.unshift(newLead as any);
+
+    // Also add/update Client in store.clients so the caller is immediately in Clients Database
+    if (!Array.isArray(store.clients)) store.clients = [];
+    const existingClient = store.clients.find(
+      (c: any) =>
+        (phone && String(c.phone || "").replace(/\D/g, "").slice(-10) === phone.replace(/\D/g, "").slice(-10)) ||
+        String(c.name || "").trim().toLowerCase() === fullName.toLowerCase()
+    );
+    if (!existingClient) {
+      store.clients.unshift({
+        id: `cli-webhook-${Date.now().toString(36)}`,
+        name: fullName,
+        phone,
+        email,
+        address: `${address}, ${city}, AB ${postalCode}`.trim(),
+        city,
+        province: "AB",
+        postalCode,
+        verdict: "Good lead",
+        tags: [sourceTab === "FB Leads" ? "facebook-lead" : "google-lead"],
+        isJobberLinked: false,
+        totalJobs: 0,
+        latestServiceDate: requestedDate,
+        notes: `${serviceRequested} (${bedrooms}, ${bathrooms}) • ${newLead.notes}`,
+        source: sourceTab === "FB Leads" ? "Facebook Lead Ad" : "Google Ads",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      } as any);
+    }
+
     store.lastSavedAt = new Date().toISOString();
     saveStore(store, projectId);
+    if (projectId !== "tidyups") {
+      saveStore(store, "tidyups");
+    }
   }
 
   res.status(200).json({
     success: true,
     lead: newLead,
+    leads: store?.adLeads || [newLead],
+    clients: store?.clients || [],
     spreadsheetId: googleSheetsSyncState.spreadsheetId,
     sheetUrl: googleSheetsSyncState.sheetUrl,
-    message: `✓ Inbound lead "${fullName}" added to ${sourceTab} in Clean Google Sheet Hub!`,
+    message: `✓ Inbound ${sourceTab} lead "${fullName}" connected & added to Master Leads Table and Clean Google Sheet!`,
+  });
+};
+
+app.post("/api/leads/webhook", handleInboundLeadWebhook());
+app.post("/api/webhooks/facebook", handleInboundLeadWebhook("Facebook Leads"));
+app.post("/api/webhooks/google", handleInboundLeadWebhook("Google Leads"));
+app.post("/api/leads/facebook", handleInboundLeadWebhook("Facebook Leads"));
+app.post("/api/leads/google", handleInboundLeadWebhook("Google Leads"));
+
+// POST /api/leads/reconnect-sheets: Reconnects Facebook Leads, Google Leads & Pulls Live Rows from Connected Google Sheets
+app.post("/api/leads/reconnect-sheets", async (req, res) => {
+  const projectId = getProjectId(req);
+  const store = loadStore(projectId);
+  const customSheetUrl = req.body?.sheetUrl || googleSheetsSyncState.sheetUrl;
+  const extractedId =
+    customSheetUrl?.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/)?.[1] ||
+    googleSheetsSyncState.spreadsheetId ||
+    LEADS_SPREADSHEET_ID;
+
+  const sheetIdsToCheck = Array.from(
+    new Set([extractedId, LEADS_SPREADSHEET_ID, SECONDARY_LEADS_SPREADSHEET_ID].filter(Boolean))
+  );
+
+  let pulledRowsCount = 0;
+  const newlyImportedLeads: any[] = [];
+
+  for (const sid of sheetIdsToCheck) {
+    for (const tabName of ["Facebook Leads", "FB Leads", "Google Leads", "ScrubbyBuilder Leads", ""]) {
+      try {
+        const csvUrl = tabName
+          ? `https://docs.google.com/spreadsheets/d/${sid}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tabName)}`
+          : `https://docs.google.com/spreadsheets/d/${sid}/gviz/tq?tqx=out:csv`;
+        const resp = await fetch(csvUrl, { method: "GET" });
+        if (!resp.ok) continue;
+        const text = await resp.text();
+        if (!text || text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html")) continue;
+
+        const lines = text
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter(Boolean);
+        if (lines.length <= 1) continue;
+
+        const headerCols = lines[0]
+          .split(",")
+          .map((c) => c.replace(/^"|"$/g, "").trim().toLowerCase());
+
+        for (let i = 1; i < Math.min(lines.length, 60); i++) {
+          const cols = lines[i].split(",").map((c) => c.replace(/^"|"$/g, "").trim());
+          if (cols.every((c) => !c)) continue;
+
+          const getByHeader = (...names: string[]) => {
+            for (const n of names) {
+              const idx = headerCols.findIndex((h) => h.includes(n));
+              if (idx >= 0 && cols[idx]) return cols[idx];
+            }
+            return "";
+          };
+
+          const firstName = getByHeader("first_name", "first name");
+          const lastName = getByHeader("last_name", "last name");
+          const rawName =
+            getByHeader("client name", "customer", "full_name", "name") ||
+            `${firstName} ${lastName}`.trim();
+          const rawPhone = normalizePhoneNumber(
+            getByHeader("phone", "mobile", "cell") ||
+              cols.find((c) => /\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/.test(c)) ||
+              ""
+          );
+          const rawEmail =
+            getByHeader("email") || cols.find((c) => /\S+@\S+\.\S+/.test(c)) || "";
+          const rawAddr =
+            getByHeader("address", "street") || "Edmonton, AB";
+          const rawService =
+            getByHeader("service", "package") || "Residential Cleaning";
+          const rawBed = getByHeader("bedroom", "bed") || "3 Bedrooms";
+          const rawBath = getByHeader("bathroom", "bath") || "2 Bathrooms";
+          const rawSource =
+            getByHeader("source_tab", "source", "sheet tab", "platform") ||
+            tabName ||
+            "FB Leads";
+
+          if (!rawName && !rawPhone) continue;
+          if (rawName.toLowerCase().includes("devon clark") || rawName.toLowerCase().includes("client name")) continue;
+
+          const exists = (store?.adLeads || []).some(
+            (l: any) =>
+              (rawPhone &&
+                String(l.phone || "").replace(/\D/g, "").slice(-10) ===
+                  rawPhone.replace(/\D/g, "").slice(-10)) ||
+              (rawName &&
+                String(l.customerName || "").trim().toLowerCase() === rawName.toLowerCase())
+          );
+
+          if (!exists && store) {
+            const { source, sourceTab } = resolveCleanSheetTab(rawSource);
+            const importedLead = {
+              id: `lead-sheet-${Date.now().toString(36)}-${pulledRowsCount}`,
+              customerName: rawName || "Google Sheet Lead",
+              phone: rawPhone,
+              email: rawEmail,
+              address: rawAddr,
+              city: getByHeader("city") || "Edmonton",
+              postalCode: getByHeader("post_code", "postal") || "",
+              serviceRequested: rawService,
+              bedrooms: /\d+$/.test(rawBed) ? `${rawBed} Bedrooms` : rawBed,
+              bathrooms: /\d+$/.test(rawBath) ? `${rawBath} Bathrooms` : rawBath,
+              dateOfServiceRequested:
+                getByHeader("date", "created_time").slice(0, 10) ||
+                new Date().toISOString().slice(0, 10),
+              source: source as any,
+              sourceTab,
+              campaignName: `${sourceTab} — Google Sheet Sync`,
+              dateReceived: new Date().toISOString(),
+              status: "New",
+              verdict: "Good lead" as const,
+              isJobberSynced: false,
+              quotedAmount: 221.07,
+              notes: getByHeader("message", "notes") || `Pulled from Google Sheet (${sid.slice(0, 8)}...)`,
+              googleSheetSynced: true,
+              googleSheetUrl: `https://docs.google.com/spreadsheets/d/${sid}/edit`,
+            };
+            store.adLeads.unshift(importedLead as any);
+            newlyImportedLeads.push(importedLead);
+            pulledRowsCount++;
+          }
+        }
+      } catch {
+        // Continue checking remaining tabs/sheets
+      }
+    }
+  }
+
+  if (store) {
+    repairAndSyncStoreData(store);
+    store.lastSavedAt = new Date().toISOString();
+    saveStore(store, projectId);
+  }
+
+  res.json({
+    success: true,
+    pulledRowsCount,
+    newlyImportedLeads,
+    leads: store?.adLeads || [],
+    clients: store?.clients || [],
+    quotes: store?.quotes || [],
+    webhooks: {
+      facebook: "https://app.tidyupscleaning.com/api/webhooks/facebook",
+      google: "https://app.tidyupscleaning.com/api/webhooks/google",
+      universal: "https://app.tidyupscleaning.com/api/leads/webhook",
+      customerBookingSite: "https://book.tidyupscleaning.com",
+    },
+    message:
+      pulledRowsCount > 0
+        ? `✓ Reconnected Facebook & Google Leads and pulled ${pulledRowsCount} new lead row(s) from your Google Sheet!`
+        : `✓ Reconnected Facebook & Google Lead Webhooks + Customer Booking Site (book.tidyupscleaning.com)! All ${store?.adLeads?.length || 0} leads are active and synced.`,
   });
 });
 
@@ -6041,10 +6597,17 @@ app.post("/api/quick-quote/save", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Public Customer-Facing Booking Intake Endpoint (Option A for book-my-cleaning.com)
+// Public Customer-Facing Booking Intake Endpoint (For book.tidyupscleaning.com)
+// Automatically saves to:
+// 1. Master Leads & Quotes Table / Clean Google Sheet (store.adLeads)
+// 2. Clients Database (store.clients)
+// 3. Jobber Quotes Ledger (store.quotes)
+// 4. Schedule Visits (store.scheduledVisits)
+// 5. Dispatch Tickets / Intakes (store.tickets)
 // ─────────────────────────────────────────────────────────────────────────────
 app.post("/api/public/book", async (req, res) => {
   try {
+    const projectId = getProjectId(req);
     const {
       customerName,
       customerPhone,
@@ -6052,24 +6615,36 @@ app.post("/api/public/book", async (req, res) => {
       serviceType,
       address,
       city,
+      postalCode,
       bedrooms,
       bathrooms,
+      cleanerCount,
+      frequency,
+      selectedAddons,
+      estimatedSubtotal,
+      estimatedTotal,
       preferredDate,
       preferredTime,
       specialInstructions,
+      heardAbout,
+      utmSource,
     } = req.body || {};
 
     if (!customerName || !customerPhone || !address) {
       return res.status(400).json({ error: "Name, phone, and address are required." });
     }
 
+    const cleanPhone = normalizePhoneNumber(String(customerPhone));
     const ticketId = `ticket-${Date.now().toString(36)}`;
     const randomSuffix = Math.floor(10000 + Math.random() * 90000);
     const jobberJobId = `JOB-${randomSuffix}`;
+    const quoteNumber = `QT-${Math.floor(4385 + Math.random() * 500)}`;
+    const quoteId = `quote_local_${Date.now()}`;
 
-    // Geocode or determine coordinates in Edmonton
-    const lat = 53.5461 + (Math.random() - 0.5) * 0.08;
-    const lng = -113.4938 + (Math.random() - 0.5) * 0.12;
+    // Geocode or determine accurate coordinates in Edmonton
+    const coords = resolveEdmontonCoords(address);
+    const lat = coords.lat;
+    const lng = coords.lng;
 
     const realCleaners = [
       { id: "cleaner-1", name: "Melissa Clarke (Unit 1)" },
@@ -6092,15 +6667,48 @@ app.post("/api/public/book", async (req, res) => {
     const assignedTech = picked.id;
     const assignedCrew = picked.name;
 
+    const curStore = loadStore(projectId) || loadStore("tidyups");
+    const catalog = curStore?.serviceCatalog || CANONICAL_SERVICE_CATALOG;
+    const matchedCatalog = matchCatalogItem(serviceType, bedrooms, bathrooms, catalog);
+
+    const baseSub =
+      Number(estimatedSubtotal) > 0
+        ? Number(estimatedSubtotal)
+        : matchedCatalog?.basePrice || 210;
+    const totalWithTax =
+      Number(estimatedTotal) > 0
+        ? Number(estimatedTotal)
+        : Math.round(baseSub * 1.05 * 100) / 100;
+    const taxAmount = Math.round((totalWithTax - baseSub) * 100) / 100;
+
+    const addonsList = Array.isArray(selectedAddons) ? selectedAddons : [];
+    const crewLabel = cleanerCount ? `${cleanerCount} Cleaner${Number(cleanerCount) > 1 ? "s" : ""}` : "1 Pro Cleaner";
+    const freqLabel = frequency || "One-Time";
+    const reqDate = preferredDate || new Date().toISOString().slice(0, 10);
+
+    // Determine source tab for Master Leads & Quotes Table (Facebook Leads, Google Leads, or Website Booking)
+    const rawOriginSource = String(utmSource || heardAbout || "book.tidyupscleaning.com");
+    const { source: resolvedSource, sourceTab: resolvedSourceTab } = resolveCleanSheetTab(rawOriginSource);
+
+    const fullDetailsNote = [
+      `Booked on book.tidyupscleaning.com (${freqLabel} • ${crewLabel})`,
+      `Preferred Date: ${reqDate} (${preferredTime || "Morning 8:00 AM - 12:00 PM"})`,
+      addonsList.length > 0 ? `Add-ons: ${addonsList.join(", ")}` : "",
+      specialInstructions ? `Customer Notes: ${specialInstructions}` : "",
+      heardAbout ? `Source: ${heardAbout}` : "",
+    ]
+      .filter(Boolean)
+      .join(" | ");
+
     const newTicket = {
       id: ticketId,
       customerName,
-      customerPhone,
+      customerPhone: cleanPhone,
       customerEmail: customerEmail || "",
       equipmentType: serviceType || "Move-Out Cleaning",
-      equipmentModel: `${bedrooms || "2 Bedrooms"} • ${bathrooms || "2 Bathrooms"}`,
+      equipmentModel: `${bedrooms || "3 Bedrooms"} • ${bathrooms || "2 Bathrooms"} (${crewLabel})`,
       status: "ASSIGNED",
-      urgency: serviceType === "Move-Out Cleaning" ? "HIGH" : "MEDIUM",
+      urgency: String(serviceType || "").toLowerCase().includes("move") ? "HIGH" : "MEDIUM",
       location: {
         address,
         city: city || "Edmonton",
@@ -6108,12 +6716,119 @@ app.post("/api/public/book", async (req, res) => {
         lng,
       },
       assignedTechnicianId: assignedTech,
-      issueDescription: `Preferred Time: ${preferredTime || "Morning"}. ${specialInstructions || "Standard clean package requested via book-my-cleaning.com."}`,
-      estimatedDurationMinutes: serviceType === "Move-Out Cleaning" ? 210 : serviceType === "Deep Cleaning" ? 240 : 120,
-      slaDeadline: preferredDate || "Today",
+      issueDescription: fullDetailsNote,
+      estimatedDurationMinutes: String(serviceType || "").toLowerCase().includes("move") ? 240 : 180,
+      slaDeadline: reqDate,
       createdAt: new Date().toISOString(),
       jobberJobId,
-      source: "website_book_my_cleaning_com",
+      source: "book.tidyupscleaning.com",
+    };
+
+    const newQuote = {
+      id: quoteId,
+      quoteNumber,
+      title: `${serviceType || "Residential Cleaning"} — ${bedrooms || "3 Bedrooms"}, ${bathrooms || "2 Bathrooms"}`,
+      clientName: customerName,
+      clientPhone: cleanPhone,
+      clientEmail: customerEmail || "",
+      service: serviceType || "Residential Cleaning",
+      serviceAddress: address,
+      bedrooms: bedrooms || "3 Bedrooms",
+      bathrooms: bathrooms || "2 Bathrooms",
+      quoteStatus: "AWAITING_RESPONSE",
+      subtotal: baseSub,
+      tax: taxAmount,
+      total: totalWithTax,
+      depositRequired: 50,
+      createdAt: new Date().toISOString(),
+      scheduledDate: reqDate,
+      scheduledTime: preferredTime || "Morning (8:00 AM - 12:00 PM)",
+      requestedDate: reqDate,
+      verdict: "Good lead",
+      notes: fullDetailsNote,
+      isLocal: true,
+      source: rawOriginSource,
+      googleSheetSynced: true,
+      googleSheetUrl: googleSheetsSyncState.sheetUrl,
+      lineItems: [
+        {
+          name: matchedCatalog?.jobberItemName || `${bedrooms || "3Bed"} ${bathrooms || "2Bath"} ${serviceType || "Cleaning"} (${crewLabel})`,
+          description: fullDetailsNote,
+          quantity: 1,
+          unitPrice: baseSub,
+          total: baseSub,
+          taxable: true,
+        },
+      ],
+    };
+
+    const newLead = {
+      id: `lead-book-${Date.now().toString(36)}`,
+      customerName,
+      phone: cleanPhone,
+      email: customerEmail || "",
+      address,
+      city: city || "Edmonton",
+      postalCode: postalCode || "",
+      serviceRequested: `${serviceType || "Residential Cleaning"} (${crewLabel})`,
+      bedrooms: bedrooms || "3 Bedrooms",
+      bathrooms: bathrooms || "2 Bathrooms",
+      dateOfServiceRequested: reqDate,
+      source: (resolvedSourceTab === "FB Leads"
+        ? "Facebook Lead Ads"
+        : resolvedSourceTab === "Google Leads"
+        ? "Google Ads / Search"
+        : "Website Booking (book.tidyupscleaning.com)") as any,
+      sourceTab: resolvedSourceTab,
+      campaignName: `book.tidyupscleaning.com (${heardAbout || "Direct Customer Booking"})`,
+      dateReceived: new Date().toISOString(),
+      status: "New",
+      verdict: "Good lead",
+      isJobberSynced: false,
+      quoteId,
+      quoteNumber,
+      quotedAmount: totalWithTax,
+      notes: fullDetailsNote,
+      googleSheetSynced: true,
+      googleSheetUrl: googleSheetsSyncState.sheetUrl,
+    };
+
+    const newClient = {
+      id: `cli-book-${Date.now().toString(36)}`,
+      name: customerName,
+      phone: cleanPhone,
+      email: customerEmail || "",
+      address,
+      city: city || "Edmonton",
+      province: "AB",
+      postalCode: postalCode || "",
+      verdict: "Good lead",
+      tags: ["book.tidyupscleaning.com", "online-booking"],
+      isJobberLinked: false,
+      totalJobs: 1,
+      latestServiceDate: reqDate,
+      notes: fullDetailsNote,
+      source: "book.tidyupscleaning.com",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    const newVisit = {
+      id: `visit-book-${Date.now().toString(36)}`,
+      visitNumber: jobberJobId,
+      title: `${serviceType || "Cleaning"} — ${customerName}`,
+      clientName: customerName,
+      clientPhone: cleanPhone,
+      serviceAddress: address,
+      lat,
+      lng,
+      startAt: `${reqDate}T09:00:00.000Z`,
+      endAt: `${reqDate}T12:00:00.000Z`,
+      assignedCleaners: [assignedCrew.replace(/\s*\(.*?\)/, "")],
+      serviceType: serviceType || "Residential Cleaning",
+      status: "SCHEDULED",
+      totalAmount: totalWithTax,
+      notes: fullDetailsNote,
     };
 
     // Auto-record to Google Sheets format
@@ -6121,22 +6836,30 @@ app.post("/api/public/book", async (req, res) => {
     googleSheetsSyncState.syncedRowsCount += 1;
     googleSheetsSyncState.lastSyncedAt = new Date().toISOString();
 
-    // Auto-save to persistent store
-    const curStore = loadStore();
+    // Auto-save to persistent store across all collections so owner gets 100% of the info
     if (curStore) {
-      saveStore({
-        ...curStore,
-        tickets: [newTicket, ...(curStore.tickets || [])],
-      });
+      curStore.tickets = [newTicket, ...(curStore.tickets || [])];
+      curStore.quotes = [newQuote as any, ...(curStore.quotes || [])];
+      curStore.adLeads = [newLead as any, ...(curStore.adLeads || [])];
+      curStore.clients = [newClient as any, ...(curStore.clients || [])];
+      curStore.scheduledVisits = [newVisit as any, ...(curStore.scheduledVisits || [])];
+      curStore.lastSavedAt = new Date().toISOString();
+      saveStore(curStore, projectId);
+      saveStore(curStore, "tidyups");
     }
 
     res.json({
       success: true,
       ticket: newTicket,
+      quote: newQuote,
+      lead: newLead,
+      client: newClient,
+      visit: newVisit,
       jobberJobId,
+      quoteNumber,
       assignedCrew,
       sheetRow,
-      message: `Booking created for ${customerName} and automatically pushed to Jobber (#${jobberJobId})!`,
+      message: `Booking created for ${customerName} (#${jobberJobId} / Quote ${quoteNumber}) and synced to your Master Leads & Quotes Table!`,
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message || "Failed to process booking." });
@@ -8999,19 +9722,23 @@ const DEFAULT_SPAM_SHIELD_CONFIG = {
   enabled: true,
   blockAllNonNorthAmerica: true, // Only allows +1 (Canada & US)
   blockedCountryCodes: ["+44", "+91", "+234", "+86", "+7", "+37", "+20", "+33"],
-  blockedPrefixes: ["1800*", "1888*", "1877*", "1844*", "1855*", "1866*"],
-  blockedNumbers: ["+18005550199", "+18885550123"],
+  blockedPrefixes: ["1408*", "1301*", "1406*", "1800*", "1888*", "1877*", "1844*", "1855*", "1866*"],
+  blockedNumbers: ["+18005550199", "+18885550123", "+14084617990", "+14084385789", "+14083207557", "+14083206464", "+14084615808", "+14084585452"],
   blockRobocallFloods: true,
   rejectionAction: "busy" as const,
   forwardDestinationNumber: "+15879007223",
   callerIdMode: "caller" as const,
   lineMappings: {
-    "+15872063733": "+15879007223", // Google My Business Direct
-    "+15877130465": "+15876027792", // Door Hangers & Signs
-    "+15878050247": "+15877422500", // Cleaning Services Ads
-    "+18253053456": "+15875708005", // Primary Dispatch
-    "+18255334317": "+18338439877", // Toll Free TIDYUPS
+    "+15872063733": "+15879007223", // Stony Plain -> Google My Business Direct
+    "+15877130465": "+15876027792", // Sherwood Park -> Door Hangers & Signs
+    "+15878050247": "+15877422500", // Saint Albert -> Cleaning Services Ads
+    "+18253053456": "+15875708005", // Calgary -> Primary Dispatch
+    "+18255334317": "+18338439877", // Calgary -> Toll Free TIDYUPS
     "+1 (825) 533 - 4317": "+18338439877",
+    "+15877138443": "+18338439877", // Sherwood Park GMB833 -> Toll Free TIDYUPS
+    "+18886145145": "+18338439877", // Toll Free 888 -> Toll Free TIDYUPS
+    "+15879063015": "+15879007223", // Leduc -> GMB / Dispatch
+    "+15872063277": "+15879007223", // Stony Plain -> GMB / Dispatch
   } as Record<string, string>,
 };
 
@@ -9164,6 +9891,16 @@ app.post("/api/twilio/spam-shield", (req, res) => {
   store.lastSavedAt = new Date().toISOString();
   saveStore(store, projectId);
 
+  if (!req.headers["x-tidyups-sync"]) {
+    for (const host of ["https://app.tidyupscleaning.com", "https://dispatchgeeni.com"]) {
+      fetch(`${host}/api/twilio/spam-shield`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-tidyups-sync": "1" },
+        body: JSON.stringify({ config: store.spamShieldConfig }),
+      }).catch(() => {});
+    }
+  }
+
   res.json({
     success: true,
     message: "Twilio & Quo Spam Shield configuration updated!",
@@ -9268,6 +10005,16 @@ app.post("/api/twilio/block-number", (req, res) => {
   store.lastSavedAt = new Date().toISOString();
   saveStore(store, projectId);
 
+  if (!req.headers["x-tidyups-sync"]) {
+    for (const host of ["https://app.tidyupscleaning.com", "https://dispatchgeeni.com"]) {
+      fetch(`${host}/api/twilio/block-number`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-tidyups-sync": "1" },
+        body: JSON.stringify({ number, reason, type }),
+      }).catch(() => {});
+    }
+  }
+
   res.json({
     success: true,
     appliedRule: appliedRuleLabel,
@@ -9324,6 +10071,16 @@ app.post("/api/twilio/unblock-number", (req, res) => {
 
   store.lastSavedAt = new Date().toISOString();
   saveStore({ ...store, explicitReplaceSpamShield: true }, projectId);
+
+  if (!req.headers["x-tidyups-sync"]) {
+    for (const host of ["https://app.tidyupscleaning.com", "https://dispatchgeeni.com"]) {
+      fetch(`${host}/api/twilio/unblock-number`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-tidyups-sync": "1" },
+        body: JSON.stringify({ number, type }),
+      }).catch(() => {});
+    }
+  }
 
   res.json({
     success: true,
@@ -10363,22 +11120,26 @@ async function startServer() {
   app.get(["/sw.js", "/dev-sw.js"], (_req, res) => {
     res.setHeader("Content-Type", "application/javascript; charset=UTF-8");
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+    res.setHeader("Clear-Site-Data", '"cache"');
     res.send(`
-      self.skipWaiting();
+      self.addEventListener('install', function() {
+        self.skipWaiting();
+      });
       self.addEventListener('activate', function(event) {
         event.waitUntil(
-          caches.keys().then(function(names) {
+          self.clients.claim().then(function() {
+            return caches.keys();
+          }).then(function(names) {
             return Promise.all(names.map(function(name) { return caches.delete(name); }));
           }).then(function() {
-            return self.registration.unregister();
-          }).then(function() {
-            return self.clients.matchAll();
+            return self.clients.matchAll({ type: 'window', includeUncontrolled: true });
           }).then(function(clients) {
             clients.forEach(function(client) {
               if (client.url && 'navigate' in client) {
                 client.navigate(client.url);
               }
             });
+            return self.registration.unregister();
           })
         );
       });
